@@ -11,7 +11,7 @@ env:
   PIP_EXTRA_INDEX_URL: https://download.pytorch.org/whl/cu128
 jobs:
   wheel:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     timeout-minutes: 360
     steps:
       - name: free disk + scratch on /mnt
@@ -19,25 +19,31 @@ jobs:
           set -euo pipefail
           sudo /usr/local/bin/containerimage 2>/dev/null || true
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/hostedtoolcache/CodeQL "$HOME/.cache/pip" || true
-          sudo mkdir -p /mnt/pipcache /mnt/tmp && sudo chown -R "$(id -un)" /mnt/pipcache /mnt/tmp
+          sudo mkdir -p /mnt/pipcache /mnt/tmp /mnt/build && sudo chown -R "$(id -un)" /mnt/pipcache /mnt/tmp /mnt/build
           df -h / /mnt
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: gate1 - CUDA 12.8 toolkit (<=8min)
-        timeout-minutes: 8
+      - name: gate1 - CUDA 12.8 toolkit (<=10min)
+        timeout-minutes: 10
         run: |
           set -euo pipefail
-          wget -qO /tmp/cuda-keyring.deb https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb
+          wget -qO /tmp/cuda-keyring.deb https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
           sudo dpkg -i /tmp/cuda-keyring.deb
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends cuda-toolkit-12-8
+          # drop non-build components (~3G): profilers, cross-arch targets, web UI
+          sudo rm -rf /usr/local/cuda-12.8/nsight-compute /usr/local/cuda-12.8/nsight-systems \
+            /usr/local/cuda-12.8/libnvvp /usr/local/cuda-12.8/extras/CUPTI/doc \
+            /usr/local/cuda-12.8/targets/aarch64-* 2>/dev/null || true
+          sudo apt-get clean; sudo rm -rf /var/lib/apt/lists/*
           echo "$CUDA_HOME/bin" >> "$GITHUB_PATH"
           echo "LD_LIBRARY_PATH=$CUDA_HOME/lib64:${LD_LIBRARY_PATH:-}" >> "$GITHUB_ENV"
           "$CUDA_HOME/bin/nvcc" --version | grep release
-      - name: gate2 - python deps (<=15min)
-        timeout-minutes: 15
+          df -h / | tail -1
+      - name: gate2 - python deps (<=20min)
+        timeout-minutes: 20
         run: |
           set -euo pipefail
           python -m pip install -U pip setuptools wheel
@@ -50,18 +56,24 @@ jobs:
           set -euo pipefail
           export CUDA_HOME=/usr/local/cuda-12.8 TORCH_CUDA_ARCH_LIST=7.0
           python tools/generate_cmake_presets.py
-          cmake --preset release 2>&1 | tail -n 40
-          echo "== configure OK =="; df -h / /mnt
+          cmake --preset release 2>&1 | tail -n 30
+          echo "== configure OK =="; df -h / | tail -1
+      - name: disk attribution (pre-gate4)
+        run: |
+          sudo du -xh --max-depth=1 / 2>/dev/null | sort -h | tail -12
+          du -sh "$PIP_CACHE_DIR" "$TMPDIR" 2>/dev/null
       - name: gate4 - compile + link (long)
-        timeout-minutes: 330
+        timeout-minutes: 320
         run: |
           set -euo pipefail
           export PATH="/usr/lib/ccache:$PATH"
-          python -m pip wheel . --no-deps -w dist/ -v > /tmp/wheelbuild.log 2>&1 &
+          rm -rf build dist; ln -sfn /mnt/build "$GITHUB_WORKSPACE/build"
+          mkdir -p dist
+          python -m pip wheel . --no-deps -w dist/ -v > wheelbuild.log 2>&1 &
           BPID=$!
-          while kill -0 $BPID 2>/dev/null; do sleep 60; df -h / | tail -1; done
-          wait $BPID
-          tail -n 150 /tmp/wheelbuild.log || true
+          while kill -0 $BPID 2>/dev/null; do sleep 120; df -h / | tail -1; du -sh /mnt/build 2>/dev/null; done
+          if ! wait $BPID; then echo "==== build FAILED, log tail ===="; tail -n 200 wheelbuild.log; exit 1; fi
+          tail -n 50 wheelbuild.log
           ls -la dist/
       - name: gate5 - sanity check wheel
         run: |
@@ -77,12 +89,14 @@ jobs:
           print(f"files={len(names)} missing={missing}")
           assert not missing, f"missing native extensions: {missing}"
           PY
-      - name: upload build log (always on failure)
+      - name: upload build log (on failure)
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: build-log
-          path: /tmp/wheelbuild.log
+          path: |
+            wheelbuild.log
+            cmake-build-release/CMakeFiles/CMakeConfigureLog.yaml
           retention-days: 7
           if-no-files-found: ignore
       - uses: actions/upload-artifact@v4
