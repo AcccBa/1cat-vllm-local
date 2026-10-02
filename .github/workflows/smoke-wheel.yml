@@ -1,0 +1,67 @@
+name: smoke-wheel-build
+on:
+  workflow_dispatch:
+    inputs:
+      torch_index_url:
+        description: "extra pip index for torch wheels (empty = default PyPI)"
+        required: false
+        default: ""
+env:
+  TORCH_CUDA_ARCH_LIST: "7.0"
+  CMAKE_CUDA_ARCHITECTURES: "70"
+  MAX_JOBS: "8"
+  CUDA_HOME: /usr/local/cuda-12.8
+jobs:
+  wheel:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: install CUDA 12.8 toolkit (nvcc + libs, no driver)
+        run: |
+          set -euo pipefail
+          wget -qO /tmp/cuda.deb https://developer.download.nvidia.com/compute/cuda/12.8.0/local_installers/cuda-toolkit_12.8.0_linux-amd64.deb
+          sudo dpkg -i /tmp/cuda.deb
+          echo "$CUDA_HOME/bin" >> "$GITHUB_PATH"
+          nvcc --version | grep release
+      - name: ccache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: cuda128-sm70
+          max-size: 2G
+      - name: python build deps
+        run: |
+          set -euo pipefail
+          python -m pip install -U pip setuptools wheel
+          if [ -n "${{ inputs.torch_index_url }}" ]; then
+            python -m pip install -r requirements/cuda.txt --extra-index-url "${{ inputs.torch_index_url }}"
+          fi
+          python -m pip install -r requirements/build.txt -r requirements/cuda.txt
+      - name: build wheel
+        run: |
+          set -euo pipefail
+          export PATH="/usr/lib/ccache:$PATH"
+          python -m pip wheel . --no-deps -w dist/ -v 2>&1 | tail -n 200
+          ls -la dist/
+      - name: sanity check wheel
+        run: |
+          set -euo pipefail
+          w=$(ls dist/*.whl)
+          echo "wheel=$w sha256=$(sha256sum "$w" | cut -d' ' -f1)"
+          python - "$w" <<'PY'
+          import sys, zipfile
+          names = set(zipfile.ZipFile(sys.argv[1]).namelist())
+          need = ["vllm/_C.abi3.so", "vllm/_moe_C.abi3.so",
+                  "flash_attn_v100/flash_attn_v100_cuda.cpython-312-x86_64-linux-gnu.so"]
+          missing = [n for n in need if n not in names]
+          print(f"files={len(names)} missing={missing}")
+          assert not missing, f"missing native extensions: {missing}"
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: smoke-wheel
+          path: dist/*.whl
+          retention-days: 30
