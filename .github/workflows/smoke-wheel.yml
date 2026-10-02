@@ -48,7 +48,9 @@ jobs:
           set -euo pipefail
           python -m pip install -U pip setuptools wheel
           python -m pip install -r requirements/build/cuda.txt -r requirements/cuda.txt
+          # build env needs rust toolchain for setuptools-rust frontend checks
           python -c "import torch; assert torch.version.cuda.startswith('12.8'), torch.version.cuda; print('torch', torch.__version__, 'cuda', torch.version.cuda)"
+          python -c "import cmake, ninja, setuptools_scm, setuptools_rust, patchelf" 2>&1 | head -1 || true
           df -h / /mnt
       - name: gate3 - cmake configure only (<=15min)
         timeout-minutes: 15
@@ -69,7 +71,7 @@ jobs:
           export PATH="/usr/lib/ccache:$PATH"
           rm -rf build dist; ln -sfn /mnt/build "$GITHUB_WORKSPACE/build"
           mkdir -p dist
-          python -m pip wheel . --no-deps -w dist/ -v > wheelbuild.log 2>&1 &
+          python -m pip wheel . --no-deps --no-build-isolation -w dist/ -v > wheelbuild.log 2>&1 &
           BPID=$!
           while kill -0 $BPID 2>/dev/null; do sleep 120; df -h / | tail -1; du -sh /mnt/build 2>/dev/null; done
           if ! wait $BPID; then echo "==== build FAILED, log tail ===="; tail -n 200 wheelbuild.log; exit 1; fi
