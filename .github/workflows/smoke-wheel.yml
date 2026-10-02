@@ -43,7 +43,7 @@ jobs:
           if [ -n "${{ inputs.torch_index_url }}" ]; then
             python -m pip install -r requirements/cuda.txt --extra-index-url "${{ inputs.torch_index_url }}"
           fi
-          python -m pip install -r requirements/build.txt -r requirements/cuda.txt
+          python -m pip install -r requirements/build/cuda.txt -r requirements/cuda.txt
       - name: build wheel
         run: |
           set -euo pipefail
