@@ -293,6 +293,7 @@ if TYPE_CHECKING:
     VLLM_SM70_TP4_PUSH_ALLREDUCE_SUM2_M1: bool = True
     VLLM_SM70_TP4_PUSH_ALLREDUCE_SMALL_MESSAGES: bool = True
     VLLM_QWEN4EXP_QSA_E4M3_STRICT_SCALES: bool = False
+    VLLM_QWEN4EXP_QSA_E4M3_MTP: bool = False
     VLLM_SM70_CUSTOM_AR_LIBRARY: str | None = None
     VLLM_SM70_TOP1_CUSTOM_AR: bool = False
     VLLM_SM70_GREEDY_TOKEN_FASTPATH: bool = True
@@ -2515,6 +2516,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # 1.0 defaults with a warning instead of failing to serve.
     "VLLM_QWEN4EXP_QSA_E4M3_STRICT_SCALES": lambda: bool(
         int(os.getenv("VLLM_QWEN4EXP_QSA_E4M3_STRICT_SCALES", "0"))
+    ),
+    # Experimental unified target/draft E4M3 QSA cache, restricted to native
+    # greedy MTP4 on SM70 TP4/PP1/DP1 FP16 with Model Runner V2. Default off
+    # until the mixed-query, graph replay and full-model quality gates pass.
+    "VLLM_QWEN4EXP_QSA_E4M3_MTP": lambda: bool(
+        int(os.getenv("VLLM_QWEN4EXP_QSA_E4M3_MTP", "0"))
     ),
     # Optional task-built custom-AR fragment. Operators present in the sidecar
     # override the production namespace; every other operator falls back.

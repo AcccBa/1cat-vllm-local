@@ -73,7 +73,7 @@ _SM70_QSA_GROUPED_PAGE4_OUTPUT_PAGES = (
     _SM70_QSA_XQA_PAGE4_PAGES * _SM70_QSA_GROUPED_PAGE4_QUERIES + 56
 )
 _SM70_QSA_XQA_PAGE4_WORKSPACES: dict[
-    tuple[int, int, int, int, int],
+    tuple[int, int, int, int, int, torch.dtype],
     tuple[int, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
 ] = {}
 _SM70_QSA_GROUPED_PAGE4_WORKSPACES: dict[
@@ -1679,17 +1679,27 @@ def _qsa_xqa_page4_block_table(
 def _qsa_xqa_page4_workspace(
     q: torch.Tensor,
     num_partitions: int,
+    kv_cache_dtype: str,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     device_index = q.device.index if q.device.index is not None else -1
     stream_id = int(torch.cuda.current_stream(q.device).cuda_stream)
-    key = (device_index, stream_id, q.shape[1], q.shape[2], num_partitions)
+    # Flash-V100 accumulates E4M3 XQA partition outputs in FP32.
+    partial_dtype = torch.float32 if kv_cache_dtype == "fp8_e4m3" else torch.float16
+    key = (
+        device_index,
+        stream_id,
+        q.shape[1],
+        q.shape[2],
+        num_partitions,
+        partial_dtype,
+    )
     workspace = _SM70_QSA_XQA_PAGE4_WORKSPACES.get(key)
     rows = q.shape[0]
     if workspace is None or workspace[0] < rows:
         capacity = 1 << (rows - 1).bit_length()
         temporary_output = torch.empty(
             (capacity, q.shape[1], num_partitions, q.shape[2]),
-            dtype=torch.float16,
+            dtype=partial_dtype,
             device=q.device,
         )
         max_logits = torch.empty(
@@ -1698,8 +1708,10 @@ def _qsa_xqa_page4_workspace(
             device=q.device,
         )
         exp_sums = torch.empty_like(max_logits)
-        active_num_partitions = torch.tensor(
-            [num_partitions], dtype=torch.int32, device=q.device
+        # The workspace can be cold on a graph-capture stream. Fill on device
+        # instead of copying a newly constructed CPU scalar into CUDA memory.
+        active_num_partitions = torch.full(
+            (1,), num_partitions, dtype=torch.int32, device=q.device
         )
         workspace = (
             capacity,
@@ -1936,7 +1948,7 @@ def _qsa_sparse_paged_attention_sm70_xqa_page4_batch(
     )
     num_partitions = math.ceil(logical_indices.shape[1] / partition_size)
     temporary_output, max_logits, exp_sums, active_num_partitions = (
-        _qsa_xqa_page4_workspace(q, num_partitions)
+        _qsa_xqa_page4_workspace(q, num_partitions, kv_cache_dtype)
     )
     physical_k_cache, physical_v_cache = _qsa_xqa_page4_physical_kv(q, k_cache, v_cache)
     flash_attn_v100_cuda.decode_paged_xqa_fwd(

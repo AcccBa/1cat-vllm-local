@@ -69,7 +69,10 @@ from .model import (
     _QWEN4_EXP_IGNORED_MISSING_SUFFIXES,
     Qwen4ExpDecoderLayer,
     Qwen4ExpMixtureOfExperts,
+    Qwen4ExpQSAAttention,
+    _finalize_qsa_e4m3_scale_load,
     _make_qwen38_decode_compile_config,
+    _remap_qsa_cache_scale_name,
 )
 from .sm70_fp16_gemv import enable_qwen38_sm70_fp16_gemv
 from .sm70_fp16_hc import enable_qwen38_sm70_fp16_fused_hc
@@ -459,6 +462,18 @@ class Qwen4ExpMultiTokenPredictor(nn.Module):
         return sample_hidden_states, multi_hidden
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        # ModuleList parameter names use local draft indices (0, ...), even
+        # though attention/cache prefixes start at mtp_start_layer_idx (48).
+        # Apply the same QSA scale aliases as the target before recursive load.
+        qsa_layer_ids = frozenset(
+            idx
+            for idx, layer in enumerate(self.layers)
+            if isinstance(layer.self_attn, Qwen4ExpQSAAttention)
+        )
+        weights = (
+            (_remap_qsa_cache_scale_name(name, qsa_layer_ids), weight)
+            for name, weight in weights
+        )
         weights = maybe_fuse_shared_experts(
             weights,
             n_routed_experts=getattr(self.config, "num_experts", 0) or 0,
@@ -667,6 +682,15 @@ class Qwen4ExpMTP(nn.Module, SupportsPP, Qwen4ExpMixtureOfExperts):
             )
         )
         _validate_mtp_expert_weights_loaded(self, loaded_weights)
+        # Finalize only after every weight group has reached the recursive
+        # predictor loader. Draft scales require their own calibrated overlay;
+        # target scales and unit defaults are not a safe substitute.
+        _finalize_qsa_e4m3_scale_load(
+            self,
+            loaded_weights,
+            self.vllm_config.cache_config.cache_dtype,
+            require_complete=True,
+        )
         return loaded_weights
 
 

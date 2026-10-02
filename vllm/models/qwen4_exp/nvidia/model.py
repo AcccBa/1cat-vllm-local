@@ -164,14 +164,22 @@ _QWEN4_EXP_IGNORED_MISSING_SUFFIXES = [
 
 
 def _validate_qsa_e4m3_scale_load(
-    required_scales: set[str], loaded: set[str], cache_dtype: str
+    required_scales: set[str],
+    loaded: set[str],
+    cache_dtype: str,
+    *,
+    require_complete: bool = False,
 ) -> set[str]:
     if cache_dtype not in ("fp8", "fp8_e4m3"):
         return set()
     missing_scales = sorted(required_scales - loaded)
     if not missing_scales:
         return set()
-    if envs.VLLM_QWEN4EXP_QSA_E4M3_STRICT_SCALES:
+    if (
+        require_complete
+        or envs.VLLM_QWEN4EXP_QSA_E4M3_STRICT_SCALES
+        or envs.VLLM_QWEN4EXP_QSA_E4M3_MTP
+    ):
         raise ValueError(
             "QSA E4M3 scale overlay is incomplete; refusing to start. "
             f"Loaded {len(required_scales) - len(missing_scales)}/"
@@ -195,7 +203,11 @@ def _validate_qsa_e4m3_scale_load(
 
 
 def _finalize_qsa_e4m3_scale_load(
-    model: nn.Module, loaded: set[str], cache_dtype: str
+    model: nn.Module,
+    loaded: set[str],
+    cache_dtype: str,
+    *,
+    require_complete: bool = False,
 ) -> None:
     if cache_dtype not in ("fp8", "fp8_e4m3"):
         return
@@ -212,7 +224,9 @@ def _finalize_qsa_e4m3_scale_load(
     required_scales = {
         f"{name}.{kind}_scale" for name in qsa_modules for kind in ("k", "v")
     }
-    missing_scales = _validate_qsa_e4m3_scale_load(required_scales, loaded, cache_dtype)
+    missing_scales = _validate_qsa_e4m3_scale_load(
+        required_scales, loaded, cache_dtype, require_complete=require_complete
+    )
     if not missing_scales:
         logger.info_once(
             "QSA E4M3 calibrated scale gate passed: loaded %d/%d K/V scales.",

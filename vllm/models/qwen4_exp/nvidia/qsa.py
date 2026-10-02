@@ -11,6 +11,7 @@ from typing import ClassVar, cast
 import torch
 from torch import nn
 
+from vllm import envs
 from vllm.config import VllmConfig
 from vllm.config.cache import CacheDType
 from vllm.distributed import get_tensor_model_parallel_world_size
@@ -59,6 +60,73 @@ from vllm.v1.kv_cache_interface import (
 
 from ..common.qsa_cache import QSAForwardMetadata
 from .indexer_qsa import QSAIndexer
+
+
+def _validate_qsa_cache_config(vllm_config: VllmConfig) -> None:
+    """Validate cache admission before allocating projection/cache tensors."""
+    cache_config = vllm_config.cache_config
+    model_config = vllm_config.model_config
+    if cache_config is None:
+        raise ValueError("Qwen4Exp QSA requires a paged KV cache")
+    if model_config.dtype not in (torch.float16, torch.bfloat16):
+        raise NotImplementedError("Qwen4Exp QSA requires FP16 or BF16")
+    if cache_config.cache_dtype not in (
+        "auto",
+        "float16",
+        "bfloat16",
+        "fp8",
+        "fp8_e4m3",
+    ):
+        raise NotImplementedError(
+            "Qwen4Exp QSA requires FP16/BF16 or E4M3 main KV cache"
+        )
+    if cache_config.cache_dtype not in ("fp8", "fp8_e4m3"):
+        return
+    parallel = vllm_config.parallel_config
+    if not current_platform.is_device_capability(70):
+        raise NotImplementedError("Qwen4Exp QSA E4M3 phase 1 requires SM70")
+    if model_config.dtype != torch.float16:
+        raise NotImplementedError("Qwen4Exp QSA E4M3 phase 1 requires FP16 activations")
+    if parallel.tensor_parallel_size != 4:
+        raise NotImplementedError("Qwen4Exp QSA E4M3 phase 1 requires TP4")
+    spec = vllm_config.speculative_config
+    if spec is None:
+        return
+    if not envs.VLLM_QWEN4EXP_QSA_E4M3_MTP:
+        raise NotImplementedError("Qwen4Exp QSA E4M3 phase 1 requires MTP0")
+    if spec.method != "mtp" or spec.num_speculative_tokens != 4:
+        raise NotImplementedError("Qwen4Exp QSA E4M3 requires native MTP4")
+    if (
+        spec.draft_sample_method != "greedy"
+        or spec.rejection_sample_method != "standard"
+    ):
+        raise NotImplementedError(
+            "Qwen4Exp QSA E4M3 MTP requires greedy drafts and standard rejection"
+        )
+    # MRV2 loads MTP with the target cache configuration. Reject an independent
+    # dtype rather than silently ignoring a requested FP16 draft cache.
+    if spec.kv_cache_dtype not in (None, "fp8", "fp8_e4m3"):
+        raise NotImplementedError(
+            "Qwen4Exp QSA E4M3 MTP requires a shared target/draft E4M3 cache"
+        )
+    if not vllm_config.use_v2_model_runner:
+        raise NotImplementedError("Qwen4Exp QSA E4M3 MTP requires Model Runner V2")
+    if parallel.pipeline_parallel_size != 1 or parallel.data_parallel_size != 1:
+        raise NotImplementedError("Qwen4Exp QSA E4M3 MTP requires PP1 and DP1")
+    if vllm_config.scheduler_config.max_num_seqs > 4:
+        raise NotImplementedError("Qwen4Exp QSA E4M3 MTP supports at most 4 sequences")
+    draft_parallel = spec.draft_parallel_config
+    if draft_parallel is not None and (
+        draft_parallel.tensor_parallel_size != 4
+        or draft_parallel.pipeline_parallel_size != 1
+        or draft_parallel.data_parallel_size != 1
+    ):
+        raise NotImplementedError("Qwen4Exp QSA E4M3 MTP requires draft TP4/PP1/DP1")
+    draft_model = spec.draft_model_config
+    if draft_model is not None and draft_model.dtype != torch.float16:
+        raise NotImplementedError(
+            "Qwen4Exp QSA E4M3 MTP requires FP16 draft activations"
+        )
 
 
 class Qwen4ExpQSAMetadataBuilder(FlashAttentionMetadataBuilder):
@@ -230,31 +298,8 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
         nn.Module.__init__(self)
         cache_config = vllm_config.cache_config
         model_config = vllm_config.model_config
-        if cache_config is None:
-            raise ValueError("Qwen4Exp QSA requires a paged KV cache")
-        if model_config.dtype not in (torch.float16, torch.bfloat16):
-            raise NotImplementedError("Qwen4Exp QSA requires FP16 or BF16")
-        if cache_config.cache_dtype not in (
-            "auto",
-            "float16",
-            "bfloat16",
-            "fp8",
-            "fp8_e4m3",
-        ):
-            raise NotImplementedError(
-                "Qwen4Exp QSA requires FP16/BF16 or E4M3 main KV cache"
-            )
-        e4m3_cache = cache_config.cache_dtype in ("fp8", "fp8_e4m3")
-        if e4m3_cache and not current_platform.is_device_capability(70):
-            raise NotImplementedError("Qwen4Exp QSA E4M3 phase 1 requires SM70")
-        if e4m3_cache and model_config.dtype != torch.float16:
-            raise NotImplementedError(
-                "Qwen4Exp QSA E4M3 phase 1 requires FP16 activations"
-            )
-        if e4m3_cache and vllm_config.parallel_config.tensor_parallel_size != 4:
-            raise NotImplementedError("Qwen4Exp QSA E4M3 phase 1 requires TP4")
-        if e4m3_cache and vllm_config.speculative_config is not None:
-            raise NotImplementedError("Qwen4Exp QSA E4M3 phase 1 requires MTP0")
+        _validate_qsa_cache_config(vllm_config)
+        assert cache_config is not None
         if getattr(quant_config, "kv_cache_scheme", None) is not None:
             raise NotImplementedError("Qwen4Exp QSA does not support KV quantization")
         parallel_config = vllm_config.parallel_config
