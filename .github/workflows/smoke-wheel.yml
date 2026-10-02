@@ -11,6 +11,12 @@ env:
   CMAKE_CUDA_ARCHITECTURES: "70"
   MAX_JOBS: "8"
   CUDA_HOME: /usr/local/cuda-12.8
+  # keep pip wheels/TMP off the 73G root disk; share one wheel cache between
+  # main env and isolated build env (pip hardlinks cache -> site-packages)
+  PIP_CACHE_DIR: /mnt/pipcache
+  TMPDIR: /mnt/tmp
+  # same torch variant (cu128) inside PEP517 build env as setup.py pins
+  PIP_EXTRA_INDEX_URL: https://download.pytorch.org/whl/cu128
 jobs:
   wheel:
     runs-on: ubuntu-22.04
@@ -21,7 +27,8 @@ jobs:
           set -euo pipefail
           sudo /usr/local/bin/containerimage 2>/dev/null || true
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/hostedtoolcache/CodeQL "$HOME/.cache/pip" || true
-          df -h / | tail -1
+          sudo mkdir -p /mnt/pipcache /mnt/tmp && sudo chown -R "$(id -un)" /mnt/pipcache /mnt/tmp
+          df -h / /mnt | tail -2
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
@@ -49,7 +56,7 @@ jobs:
           if [ -n "${{ inputs.torch_index_url }}" ]; then
             python -m pip install -r requirements/cuda.txt --extra-index-url "${{ inputs.torch_index_url }}"
           fi
-          python -m pip install --no-cache-dir -r requirements/build/cuda.txt -r requirements/cuda.txt
+          python -m pip install -r requirements/build/cuda.txt -r requirements/cuda.txt
       - name: build wheel
         run: |
           set -euo pipefail
