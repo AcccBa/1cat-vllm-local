@@ -33,7 +33,7 @@ jobs:
           wget -qO /tmp/cuda-keyring.deb https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb
           sudo dpkg -i /tmp/cuda-keyring.deb
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends cuda-compiler-12-8
+          sudo apt-get install -y --no-install-recommends cuda-toolkit-12-8
           echo "$CUDA_HOME/bin" >> "$GITHUB_PATH"
           echo "LD_LIBRARY_PATH=$CUDA_HOME/lib64:${LD_LIBRARY_PATH:-}" >> "$GITHUB_ENV"
           "$CUDA_HOME/bin/nvcc" --version | grep release
