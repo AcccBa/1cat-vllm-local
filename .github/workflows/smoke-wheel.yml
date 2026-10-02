@@ -48,8 +48,9 @@ jobs:
         timeout-minutes: 15
         run: |
           set -euo pipefail
-          export CMAKE_BUILD_PARALLEL_LEVEL=8
-          VLLM_TARGET_DEVICE=cuda python setup.py develop --skip-build 2>&1 | tail -n 60
+          export CUDA_HOME=/usr/local/cuda-12.8 TORCH_CUDA_ARCH_LIST=7.0
+          python tools/generate_cmake_presets.py
+          cmake --preset release 2>&1 | tail -n 40
           echo "== configure OK =="; df -h / /mnt
       - name: gate4 - compile + link (long)
         timeout-minutes: 330
