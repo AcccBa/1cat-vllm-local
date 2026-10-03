@@ -48,7 +48,7 @@ jobs:
           python -m pip install -U pip setuptools wheel
           python -m pip install -r requirements/build/cuda.txt -r requirements/cuda.txt
           python -c "import torch; assert torch.version.cuda.startswith('12.8'), torch.version.cuda; print('torch', torch.__version__, 'cuda', torch.version.cuda)"
-          python -c "import cmake, ninja, setuptools_scm, setuptools_rust, patchelf"
+          python -c "import cmake, ninja, setuptools_scm, setuptools_rust" && command -v patchelf
           df -h / /mnt
       - name: gate3 - cmake configure only (<=15min)
         timeout-minutes: 15
