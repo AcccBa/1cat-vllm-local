@@ -71,11 +71,11 @@ jobs:
           export PATH="/usr/lib/ccache:$PATH"
           rm -rf build dist; ln -sfn /mnt/build "$GITHUB_WORKSPACE/build"
           mkdir -p dist
-          python -m pip wheel . --no-deps --no-build-isolation -w dist/ -v > wheelbuild.log 2>&1 &
-          BPID=$!
-          while kill -0 $BPID 2>/dev/null; do sleep 120; df -h / | tail -1; du -sh /mnt/build 2>/dev/null; done
-          if ! wait $BPID; then echo "==== build FAILED, log tail ===="; tail -n 200 wheelbuild.log; exit 1; fi
-          tail -n 50 wheelbuild.log
+          # stream to both log and step output; pipefail keeps pip's rc
+          set -o pipefail
+          timeout 300m python -m pip wheel . --no-deps --no-build-isolation -w dist/ -v 2>&1 | tee wheelbuild.log | grep --line-buffered -E "%\]|error|Error|FAILED|Killed|No space" | tail -n 400
+          rc=${PIPESTATUS[0]}
+          if [ "$rc" != "0" ]; then echo "==== build FAILED rc=$rc, log tail ===="; tail -n 200 wheelbuild.log; exit "$rc"; fi
           ls -la dist/
       - name: gate5 - sanity check wheel
         run: |
