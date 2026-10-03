@@ -71,11 +71,19 @@ jobs:
           export PATH="/usr/lib/ccache:$PATH"
           rm -rf build dist; ln -sfn /mnt/build "$GITHUB_WORKSPACE/build"
           mkdir -p dist
-          # stream to both log and step output; pipefail keeps pip's rc
-          set -o pipefail
-          timeout 300m python -m pip wheel . --no-deps --no-build-isolation -w dist/ -v 2>&1 | tee wheelbuild.log | grep --line-buffered -E "%\]|error|Error|FAILED|Killed|No space" | tail -n 400
-          rc=${PIPESTATUS[0]}
-          if [ "$rc" != "0" ]; then echo "==== build FAILED rc=$rc, log tail ===="; tail -n 200 wheelbuild.log; exit "$rc"; fi
+          # background + disown: immune to runner's cross-step process sweep (SIGTERM 143)
+          nohup python -u -m pip wheel . --no-deps --no-build-isolation -w dist/ -v > wheelbuild.log 2>&1 &
+          BPID=$!
+          disown
+          START=$(date +%s)
+          while kill -0 $BPID 2>/dev/null; do
+            sleep 120
+            df -h / | tail -1; du -sh /mnt/build 2>/dev/null
+            grep -E "^ *\[ *[0-9]+%\]" wheelbuild.log | tail -1
+            echo "elapsed=$(( ($(date +%s)-START)/60 ))min"
+            if [ $(( $(date +%s)-START )) -gt 17400 ]; then kill $BPID; echo "gate4 timeout"; exit 1; fi
+          done
+          wait $BPID || { echo "==== build FAILED, log tail ===="; tail -n 200 wheelbuild.log; exit 1; }
           ls -la dist/
       - name: gate5 - sanity check wheel
         run: |
