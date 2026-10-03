@@ -64,10 +64,10 @@ jobs:
           set -euo pipefail
           export PATH="/usr/lib/ccache:$PATH"
           rm -rf build; ln -sfn /mnt/build "$GITHUB_WORKSPACE/build"
-          cmake --build cmake-build-release --config Release --target _C -- -v > probe.log 2>&1 &
-          BPID=$!
-          while kill -0 $BPID 2>/dev/null; do sleep 60; df -h / | tail -1; grep -E "^\[[0-9]+%\]" probe.log | tail -1; done
-          wait $BPID || { echo "==== probe FAILED ===="; tail -n 120 probe.log; exit 1; }
+          set -o pipefail
+          cmake --build cmake-build-release --target _C -- -v 2>&1 | tee probe.log | grep --line-buffered -E "^\[[0-9]+%\]|error|FAILED" | tail -n 200
+          rc=${PIPESTATUS[0]}
+          [ "$rc" = "0" ] || { echo "==== probe FAILED rc=$rc ===="; tail -n 120 probe.log; exit 1; }
           echo "== probe OK: nvcc/c++/link toolchain works =="
           tail -3 probe.log; df -h / | tail -1
       - name: gate4b - full wheel build (<=290min)
