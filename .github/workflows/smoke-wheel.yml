@@ -58,16 +58,20 @@ jobs:
           python tools/generate_cmake_presets.py
           cmake --preset release 2>&1 | tail -n 30
           echo "== configure OK =="; df -h / | tail -1
-      - name: gate4a - compile probe (<=10min, fail fast)
-        timeout-minutes: 10
+      - name: gate4a - tiny-target probe + cache warm (<=12min)
+        timeout-minutes: 12
         run: |
           set -euo pipefail
           export PATH="/usr/lib/ccache:$PATH"
           rm -rf build; ln -sfn /mnt/build "$GITHUB_WORKSPACE/build"
           set -o pipefail
-          timeout 540 cmake --build cmake-build-release --target _C -- -v 2>&1 | tee probe.log | grep --line-buffered -E "^\[[0-9]+%\]|error|FAILED" | tail -n 200
+          # tiny target: proves nvcc+ccache+link toolchain in ~1min (fail fast)
+          timeout 240 cmake --build cmake-build-release --target spinloop -v 2>&1 | tee probe.log | tail -n 40
           rc=${PIPESTATUS[0]}
           [ "$rc" = "0" ] || { echo "==== probe FAILED rc=$rc ===="; tail -n 120 probe.log; exit 1; }
+          # ccache cold cache is the real time sink; warm it now in parallel
+          ( ccache -z; timeout 500 cmake --build cmake-build-release --target _C -j 8 > probe_C.log 2>&1; echo "warm_C_rc=$?" >> probe_C.log ) &
+          echo "== probe OK, cache warming started =="
           echo "== probe OK: nvcc/c++/link toolchain works =="
           tail -3 probe.log; df -h / | tail -1
       - name: gate4b - full wheel build (<=290min)
