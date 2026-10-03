@@ -33,7 +33,6 @@ jobs:
           sudo dpkg -i /tmp/cuda-keyring.deb
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends cuda-toolkit-12-8
-          # drop non-build components (~3G): profilers, cross-arch targets, web UI
           sudo rm -rf /usr/local/cuda-12.8/nsight-compute /usr/local/cuda-12.8/nsight-systems \
             /usr/local/cuda-12.8/libnvvp /usr/local/cuda-12.8/extras/CUPTI/doc \
             /usr/local/cuda-12.8/targets/aarch64-* 2>/dev/null || true
@@ -48,9 +47,8 @@ jobs:
           set -euo pipefail
           python -m pip install -U pip setuptools wheel
           python -m pip install -r requirements/build/cuda.txt -r requirements/cuda.txt
-          # build env needs rust toolchain for setuptools-rust frontend checks
           python -c "import torch; assert torch.version.cuda.startswith('12.8'), torch.version.cuda; print('torch', torch.__version__, 'cuda', torch.version.cuda)"
-          python -c "import cmake, ninja, setuptools_scm, setuptools_rust, patchelf" 2>&1 | head -1 || true
+          python -c "import cmake, ninja, setuptools_scm, setuptools_rust, patchelf"
           df -h / /mnt
       - name: gate3 - cmake configure only (<=15min)
         timeout-minutes: 15
@@ -60,30 +58,33 @@ jobs:
           python tools/generate_cmake_presets.py
           cmake --preset release 2>&1 | tail -n 30
           echo "== configure OK =="; df -h / | tail -1
-      - name: disk attribution (pre-gate4)
-        run: |
-          sudo du -xh --max-depth=1 / 2>/dev/null | sort -h | tail -12
-          du -sh "$PIP_CACHE_DIR" "$TMPDIR" 2>/dev/null
-      - name: gate4 - compile + link (long)
-        timeout-minutes: 320
+      - name: gate4a - compile probe (<=10min, fail fast)
+        timeout-minutes: 10
         run: |
           set -euo pipefail
           export PATH="/usr/lib/ccache:$PATH"
-          rm -rf build dist; ln -sfn /mnt/build "$GITHUB_WORKSPACE/build"
-          mkdir -p dist
-          # background + disown: immune to runner's cross-step process sweep (SIGTERM 143)
-          nohup python -u -m pip wheel . --no-deps --no-build-isolation -w dist/ -v > wheelbuild.log 2>&1 &
+          rm -rf build; ln -sfn /mnt/build "$GITHUB_WORKSPACE/build"
+          cmake --build cmake-build-release --target _C -- -v > probe.log 2>&1 &
           BPID=$!
-          disown
-          START=$(date +%s)
+          while kill -0 $BPID 2>/dev/null; do sleep 60; df -h / | tail -1; grep -E "^\[[0-9]+%\]" probe.log | tail -1; done
+          wait $BPID || { echo "==== probe FAILED ===="; tail -n 120 probe.log; exit 1; }
+          echo "== probe OK: nvcc/c++/link toolchain works =="
+          tail -3 probe.log; df -h / | tail -1
+      - name: gate4b - full wheel build (<=290min)
+        timeout-minutes: 290
+        run: |
+          set -euo pipefail
+          export PATH="/usr/lib/ccache:$PATH"
+          mkdir -p dist
+          python -m pip wheel . --no-deps --no-build-isolation -w dist/ -v > wheelbuild.log 2>&1 &
+          BPID=$!
           while kill -0 $BPID 2>/dev/null; do
             sleep 120
             df -h / | tail -1; du -sh /mnt/build 2>/dev/null
             grep -E "^ *\[ *[0-9]+%\]" wheelbuild.log | tail -1
-            echo "elapsed=$(( ($(date +%s)-START)/60 ))min"
-            if [ $(( $(date +%s)-START )) -gt 17400 ]; then kill $BPID; echo "gate4 timeout"; exit 1; fi
           done
           wait $BPID || { echo "==== build FAILED, log tail ===="; tail -n 200 wheelbuild.log; exit 1; }
+          tail -n 30 wheelbuild.log
           ls -la dist/
       - name: gate5 - sanity check wheel
         run: |
@@ -99,14 +100,14 @@ jobs:
           print(f"files={len(names)} missing={missing}")
           assert not missing, f"missing native extensions: {missing}"
           PY
-      - name: upload build log (on failure)
+      - name: upload logs (on failure)
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: build-log
           path: |
             wheelbuild.log
-            cmake-build-release/CMakeFiles/CMakeConfigureLog.yaml
+            probe.log
           retention-days: 7
           if-no-files-found: ignore
       - uses: actions/upload-artifact@v4
