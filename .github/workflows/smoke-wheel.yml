@@ -65,7 +65,7 @@ jobs:
           export PATH="/usr/lib/ccache:$PATH"
           rm -rf build; ln -sfn /mnt/build "$GITHUB_WORKSPACE/build"
           set -o pipefail
-          cmake --build cmake-build-release --target _C -- -v 2>&1 | tee probe.log | grep --line-buffered -E "^\[[0-9]+%\]|error|FAILED" | tail -n 200
+          timeout 540 cmake --build cmake-build-release --target _C -- -v 2>&1 | tee probe.log | grep --line-buffered -E "^\[[0-9]+%\]|error|FAILED" | tail -n 200
           rc=${PIPESTATUS[0]}
           [ "$rc" = "0" ] || { echo "==== probe FAILED rc=$rc ===="; tail -n 120 probe.log; exit 1; }
           echo "== probe OK: nvcc/c++/link toolchain works =="
@@ -76,14 +76,12 @@ jobs:
           set -euo pipefail
           export PATH="/usr/lib/ccache:$PATH"
           mkdir -p dist
-          python -m pip wheel . --no-deps --no-build-isolation -w dist/ -v > wheelbuild.log 2>&1 &
-          BPID=$!
-          while kill -0 $BPID 2>/dev/null; do
-            sleep 120
-            df -h / | tail -1; du -sh /mnt/build 2>/dev/null
-            grep -E "^ *\[ *[0-9]+%\]" wheelbuild.log | tail -1
-          done
-          wait $BPID || { echo "==== build FAILED, log tail ===="; tail -n 200 wheelbuild.log; exit 1; }
+          set -o pipefail
+          timeout 17000 python -m pip wheel . --no-deps --no-build-isolation -w dist/ -v 2>&1 | tee wheelbuild.log | grep --line-buffered -E "^ *\[ *[0-9]+%\]|error|FAILED|Killed|No space" | tail -n 400 &
+          WATCH=$!
+          while kill -0 $WATCH 2>/dev/null; do sleep 180; df -h / | tail -1; du -sh /mnt/build 2>/dev/null; done
+          wait $WATCH; rc=${PIPESTATUS[0]}
+          [ "$rc" = "0" ] || { echo "==== build FAILED rc=$rc, log tail ===="; tail -n 200 wheelbuild.log; exit 1; }
           tail -n 30 wheelbuild.log
           ls -la dist/
       - name: gate5 - sanity check wheel
